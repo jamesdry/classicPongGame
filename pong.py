@@ -71,6 +71,7 @@ ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 SOUND_BOUNCE = os.path.join(ASSET_DIR, "bounce.wav")
 SOUND_SCORE = os.path.join(ASSET_DIR, "score.wav")
 BGM_MENU = os.path.join(ASSET_DIR, "menu_bgm.ogg")
+ICON_PATH = os.path.join(ASSET_DIR, "icon.ico")
 
 MIXER_FREQ = 44100
 MIXER_SIZE = -16
@@ -568,6 +569,7 @@ class PongApp:
         self.root.title(APP_TITLE)
         self.root.resizable(width=False, height=False)
         self.root.configure(bg=CANVAS_BG)
+        self._set_window_icon()
         self._center_window()
 
         self.audio = AudioManager()
@@ -580,6 +582,12 @@ class PongApp:
         self._mode = MODE_MULTIPLAYER
         self._difficulty = None
         self.show_main_menu()
+
+    def _set_window_icon(self):
+        try:
+            self.root.iconbitmap(default=ICON_PATH)
+        except (tk.TclError, FileNotFoundError):
+            pass
 
     def _center_window(self):
         self.root.update_idletasks()
