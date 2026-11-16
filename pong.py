@@ -1,5 +1,7 @@
 import tkinter as tk
 import random
+import pygame
+import os
 
 APP_TITLE = "Classic Pong Game"
 WINDOW_WIDTH = 800
@@ -36,6 +38,91 @@ BUTTON_BG = "#222222"
 BUTTON_FG = "white"
 BUTTON_ACTIVE_BG = "#444444"
 
+ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
+SOUND_BOUNCE = os.path.join(ASSET_DIR, "bounce.wav")
+SOUND_SCORE = os.path.join(ASSET_DIR, "score.wav")
+BGM_MENU = os.path.join(ASSET_DIR, "menu_bgm.ogg")
+
+MIXER_FREQ = 44100
+MIXER_SIZE = -16
+MIXER_CHANNELS = 2
+MIXER_BUFFER = 512
+
+class AudioManager:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self._bounce_sound = None
+        self._score_sound = None
+        self._bgm_loaded = False
+        self._available = False
+        try:
+            pygame.mixer.init(
+                frequency=MIXER_FREQ,
+                size=MIXER_SIZE,
+                channels=MIXER_CHANNELS,
+                buffer=MIXER_BUFFER,
+            )
+            self._available = True
+        except pygame.error:
+            self._available = False
+            return
+        self._load_sounds()
+
+    def _load_sounds(self):
+        if not self._available:
+            return
+        try:
+            self._bounce_sound = pygame.mixer.Sound(SOUND_BOUNCE)
+        except (FileNotFoundError, pygame.error):
+            self._bounce_sound = None
+        try:
+            self._score_sound = pygame.mixer.Sound(SOUND_SCORE)
+        except (FileNotFoundError, pygame.error):
+            self._score_sound = None
+
+    def play_bounce(self):
+        if self._bounce_sound:
+            self._bounce_sound.play()
+
+    def play_score(self):
+        if self._score_sound:
+            self._score_sound.play()
+
+    def play_menu_bgm(self):
+        if not self._available or self._bgm_loaded:
+            return
+        try:
+            pygame.mixer.music.load(BGM_MENU)
+            pygame.mixer.music.set_volume(0.3)
+            pygame.mixer.music.play(-1)
+            self._bgm_loaded = True
+        except (FileNotFoundError, pygame.error):
+            self._bgm_loaded = False
+
+    def stop_menu_bgm(self):
+        if not self._available or not self._bgm_loaded:
+            return
+        pygame.mixer.music.stop()
+        self._bgm_loaded = False
+
+    def shutdown(self):
+        if not self._available:
+            return
+        try:
+            pygame.mixer.music.stop()
+            pygame.mixer.quit()
+        except pygame.error:
+            pass
 
 def make_button(parent, text, command, width=15):
     return tk.Button(
@@ -97,16 +184,20 @@ class Ball:
         self.sync()
 
     def update(self):
+        bounced_wall = False
         self.x += self.vx
         self.y += self.vy
         r = self.radius
         if self.y - r <= 0:
             self.y = r
             self.vy = abs(self.vy)
+            bounced_wall = True
         elif self.y + r >= WINDOW_HEIGHT:
             self.y = WINDOW_HEIGHT - r
             self.vy = -abs(self.vy)
+            bounced_wall = True
         self.sync()
+        return bounced_wall
 
     def sync(self):
         self.canvas.coords(self.item, *self.bbox)
@@ -122,6 +213,9 @@ class MainMenuFrame(tk.Frame):
                  fg=TEXT_COLOR, bg=CANVAS_BG).pack(pady=(80, 40))
         make_button(self, "Play", self.app.show_score_select).pack(pady=10)
         make_button(self, "Quit", self.app.root.destroy).pack(pady=10)
+
+    def on_show(self):
+        self.app.audio.play_menu_bgm()
 
 class ScoreSelectFrame(tk.Frame):
     def __init__(self, parent, app):
@@ -143,6 +237,9 @@ class ScoreSelectFrame(tk.Frame):
             ).pack(side="left", padx=10)
 
         make_button(self, "Back", self.app.show_main_menu).pack(pady=40)
+
+    def on_show(self):
+        self.app.audio.play_menu_bgm()
 
 class GameFrame(tk.Frame):
     def __init__(self, parent, app, target_score):
@@ -218,7 +315,9 @@ class GameFrame(tk.Frame):
     def _update(self):
         self.left_paddle.update(self.pressed_keys)
         self.right_paddle.update(self.pressed_keys)
-        self.ball.update()
+        bounced = self.ball.update()
+        if bounced:
+            self.app.audio.play_bounce()
         self._resolve_paddle_collisions()
         self._handle_out_of_bounds()
 
@@ -228,12 +327,14 @@ class GameFrame(tk.Frame):
             self.ball.vx = abs(self.ball.vx)
             self.ball.x = self.left_paddle.bbox[2] + self.ball.radius
             self.ball.sync()
+            self.app.audio.play_bounce()
 
         if (self._boxes_overlap(self.ball.bbox, self.right_paddle.bbox)
                 and self.ball.vx > 0):
             self.ball.vx = -abs(self.ball.vx)
             self.ball.x = self.right_paddle.bbox[0] - self.ball.radius
             self.ball.sync()
+            self.app.audio.play_bounce()
 
     def _handle_out_of_bounds(self):
         if self.ball.bbox[2] < 0:
@@ -243,6 +344,7 @@ class GameFrame(tk.Frame):
         else:
             return
 
+        self.app.audio.play_score()
         self._update_score_display()
         self._check_game_over()
         if not self._game_over:
@@ -310,6 +412,9 @@ class GameOverFrame(tk.Frame):
             width=12,
         ).pack(side="left", padx=10)
 
+    def on_show(self):
+        self.app.audio.play_menu_bgm()
+
 class PongApp:
     def __init__(self, root):
         self.root = root
@@ -317,6 +422,9 @@ class PongApp:
         self.root.resizable(width=False, height=False)
         self.root.configure(bg=CANVAS_BG)
         self._center_window()
+
+        self.audio = AudioManager()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.container = tk.Frame(root, bg=CANVAS_BG)
         self.container.pack(fill="both", expand=True)
@@ -337,6 +445,8 @@ class PongApp:
             self._current_screen.destroy()
         self._current_screen = screen
         screen.pack(fill="both", expand=True)
+        if hasattr(screen, "on_show"):
+            screen.on_show()
 
     def show_main_menu(self):
         self._switch_screen(MainMenuFrame(self.container, self))
@@ -345,12 +455,18 @@ class PongApp:
         self._switch_screen(ScoreSelectFrame(self.container, self))
 
     def start_game(self, target_score):
+        self.audio.stop_menu_bgm()
         self._switch_screen(GameFrame(self.container, self, target_score))
 
     def show_game_over(self, winner, left_score, right_score, target_score):
+        self.audio.stop_menu_bgm()
         self._switch_screen(GameOverFrame(
             self.container, self, winner, left_score, right_score, target_score
         ))
+
+    def _on_close(self):
+        self.audio.shutdown()
+        self.root.destroy()
 
 def main():
     root = tk.Tk()
