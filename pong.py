@@ -1,7 +1,7 @@
-import tkinter as tk
-import random
-import pygame
 import os
+import random
+import tkinter as tk
+import pygame
 
 APP_TITLE = "Classic Pong Game"
 WINDOW_WIDTH = 800
@@ -27,6 +27,35 @@ BALL_SPEED_Y = 4
 BALL_COLOR = "white"
 
 SCORE_OPTIONS = (10, 20, 30)
+
+MODE_MULTIPLAYER = "multiplayer"
+MODE_AI = "ai"
+
+AI_DIFFICULTIES = ("Easy", "Medium", "Hard")
+
+AI_DIFFICULTY_CONFIGS = {
+    "Easy": {
+        "speed_factor": 0.45,
+        "dead_zone": 18,
+        "error_margin": 70,
+        "offset_interval": 12,
+        "predict": False,
+    },
+    "Medium": {
+        "speed_factor": 0.7,
+        "dead_zone": 12,
+        "error_margin": 32,
+        "offset_interval": 25,
+        "predict": False,
+    },
+    "Hard": {
+        "speed_factor": 1.0,
+        "dead_zone": 4,
+        "error_margin": 6,
+        "offset_interval": 60,
+        "predict": True,
+    },
+}
 
 TITLE_FONT = ("Helvetica", 64, "bold")
 SUBTITLE_FONT = ("Helvetica", 22)
@@ -133,12 +162,13 @@ def make_button(parent, text, command, width=15):
     )
 
 class Paddle:
-    def __init__(self, canvas, x, up_key, down_key):
+    def __init__(self, canvas, x, up_key, down_key, speed=PADDLE_SPEED):
         self.canvas = canvas
         self.x = x
         self.y = (WINDOW_HEIGHT - PADDLE_HEIGHT) // 2
         self.up_key = up_key
         self.down_key = down_key
+        self.speed = speed
         self.item = canvas.create_rectangle(
             self.x, self.y,
             self.x + PADDLE_WIDTH, self.y + PADDLE_HEIGHT,
@@ -149,16 +179,22 @@ class Paddle:
     def bbox(self):
         return (self.x, self.y, self.x + PADDLE_WIDTH, self.y + PADDLE_HEIGHT)
 
+    def move(self, dy):
+        if dy == 0:
+            return
+        new_y = max(0, min(WINDOW_HEIGHT - PADDLE_HEIGHT, self.y + dy))
+        if new_y == self.y:
+            return
+        self.y = new_y
+        self.canvas.coords(self.item, *self.bbox)
+
     def update(self, pressed_keys):
         dy = 0
         if self.up_key in pressed_keys:
-            dy -= PADDLE_SPEED
+            dy -= self.speed
         if self.down_key in pressed_keys:
-            dy += PADDLE_SPEED
-        if dy == 0:
-            return
-        self.y = max(0, min(WINDOW_HEIGHT - PADDLE_HEIGHT, self.y + dy))
-        self.canvas.coords(self.item, *self.bbox)
+            dy += self.speed
+        self.move(dy)
 
 class Ball:
     def __init__(self, canvas):
@@ -202,6 +238,58 @@ class Ball:
     def sync(self):
         self.canvas.coords(self.item, *self.bbox)
 
+class AIController:
+    def __init__(self, paddle, difficulty):
+        self.paddle = paddle
+        self.config = AI_DIFFICULTY_CONFIGS[difficulty]
+        self.paddle.speed = max(1, int(round(PADDLE_SPEED * self.config["speed_factor"])))
+        self._target_offset = 0.0
+        self._offset_timer = 0
+
+    def update(self, ball):
+        self._offset_timer += 1
+        if self._offset_timer >= self.config["offset_interval"]:
+            self._target_offset = random.uniform(
+                -self.config["error_margin"], self.config["error_margin"]
+            )
+            self._offset_timer = 0
+
+        if ball.vx < 0:
+            target_y = WINDOW_HEIGHT / 2
+        elif self.config["predict"]:
+            target_y = self._predict_ball_y(ball)
+        else:
+            target_y = ball.y
+
+        target_y += self._target_offset
+        paddle_center = self.paddle.y + PADDLE_HEIGHT / 2
+        diff = target_y - paddle_center
+
+        if abs(diff) < self.config["dead_zone"]:
+            return
+
+        direction = 1 if diff > 0 else -1
+        self.paddle.move(direction * self.paddle.speed)
+
+    def _predict_ball_y(self, ball):
+        if ball.vx <= 0:
+            return WINDOW_HEIGHT / 2
+        time_to_reach = (self.paddle.x - ball.x) / ball.vx
+        if time_to_reach <= 0:
+            return ball.y
+        predicted_y = ball.y + ball.vy * time_to_reach
+        r = ball.radius
+        min_y = r
+        max_y = WINDOW_HEIGHT - r
+        span = max_y - min_y
+        if span <= 0:
+            return WINDOW_HEIGHT / 2
+        period = 2 * span
+        normalized = (predicted_y - min_y) % period
+        if normalized < span:
+            return min_y + normalized
+        return max_y - (normalized - span)
+
 class MainMenuFrame(tk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent, bg=CANVAS_BG)
@@ -211,8 +299,41 @@ class MainMenuFrame(tk.Frame):
     def _build(self):
         tk.Label(self, text="PONG", font=TITLE_FONT,
                  fg=TEXT_COLOR, bg=CANVAS_BG).pack(pady=(80, 40))
-        make_button(self, "Play", self.app.show_score_select).pack(pady=10)
+        make_button(self, "Play", self.app.show_mode_select).pack(pady=10)
         make_button(self, "Quit", self.app.root.destroy).pack(pady=10)
+
+    def on_show(self):
+        self.app.audio.play_menu_bgm()
+
+class ModeSelectFrame(tk.Frame):
+    def __init__(self, parent, app):
+        super().__init__(parent, bg=CANVAS_BG)
+        self.app = app
+        self._build()
+
+    def _build(self):
+        tk.Label(self, text="Select Game Mode", font=SUBTITLE_FONT,
+                 fg=TEXT_COLOR, bg=CANVAS_BG).pack(pady=(80, 30))
+
+        make_button(
+            self, "2 Players",
+            command=lambda: self.app.select_mode(MODE_MULTIPLAYER, None),
+            width=20,
+        ).pack(pady=10)
+
+        tk.Label(self, text="Play vs AI Bot", font=SUBTITLE_FONT,
+                 fg=TEXT_COLOR, bg=CANVAS_BG).pack(pady=(20, 10))
+
+        difficulty_row = tk.Frame(self, bg=CANVAS_BG)
+        difficulty_row.pack()
+        for difficulty in AI_DIFFICULTIES:
+            make_button(
+                difficulty_row, difficulty,
+                command=lambda d=difficulty: self.app.select_mode(MODE_AI, d),
+                width=8,
+            ).pack(side="left", padx=8)
+
+        make_button(self, "Back", self.app.show_main_menu, width=20).pack(pady=30)
 
     def on_show(self):
         self.app.audio.play_menu_bgm()
@@ -224,8 +345,10 @@ class ScoreSelectFrame(tk.Frame):
         self._build()
 
     def _build(self):
+        tk.Label(self, text=self.app.get_mode_label(), font=SUBTITLE_FONT,
+                 fg=HINT_COLOR, bg=CANVAS_BG).pack(pady=(80, 10))
         tk.Label(self, text="Select Winning Score", font=SUBTITLE_FONT,
-                 fg=TEXT_COLOR, bg=CANVAS_BG).pack(pady=(100, 40))
+                 fg=TEXT_COLOR, bg=CANVAS_BG).pack(pady=(0, 40))
 
         options = tk.Frame(self, bg=CANVAS_BG)
         options.pack()
@@ -236,16 +359,19 @@ class ScoreSelectFrame(tk.Frame):
                 width=6,
             ).pack(side="left", padx=10)
 
-        make_button(self, "Back", self.app.show_main_menu).pack(pady=40)
+        make_button(self, "Back", self.app.show_mode_select).pack(pady=40)
 
     def on_show(self):
         self.app.audio.play_menu_bgm()
 
 class GameFrame(tk.Frame):
-    def __init__(self, parent, app, target_score):
+    def __init__(self, parent, app, target_score,
+                 mode=MODE_MULTIPLAYER, difficulty=None):
         super().__init__(parent, bg=CANVAS_BG)
         self.app = app
         self.target_score = target_score
+        self.mode = mode
+        self.difficulty = difficulty
         self.left_score = 0
         self.right_score = 0
         self.pressed_keys = set()
@@ -254,9 +380,18 @@ class GameFrame(tk.Frame):
         self._release_bind = None
         self._game_over = False
         self._winner = None
+        self.ai_controller = None
+
+        if self.mode == MODE_AI:
+            self._left_name = "You"
+            self._right_name = f"AI ({self.difficulty})"
+        else:
+            self._left_name = "Left Player"
+            self._right_name = "Right Player"
 
         self._build_canvas()
         self._create_entities()
+        self._setup_ai()
         self._bind_events()
         self._start_loop()
 
@@ -276,10 +411,14 @@ class GameFrame(tk.Frame):
         self.right_score_text = self.canvas.create_text(
             mid_x + 80, 50, text="0", fill=TEXT_COLOR, font=SCORE_FONT)
 
+        if self.mode == MODE_AI:
+            hint = f"You: W/S   |   AI: {self.difficulty}   |   First to {self.target_score} wins"
+        else:
+            hint = f"Left: W/S   |   Right: Up/Down   |   First to {self.target_score} wins"
+
         self.canvas.create_text(
             mid_x, WINDOW_HEIGHT - 20,
-            text=f"Left: W/S   |   Right: Up/Down   |   First to {self.target_score} wins",
-            fill=HINT_COLOR, font=HINT_FONT,
+            text=hint, fill=HINT_COLOR, font=HINT_FONT,
         )
 
     def _create_entities(self):
@@ -288,6 +427,10 @@ class GameFrame(tk.Frame):
         right_x = WINDOW_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH
         self.left_paddle = Paddle(self.canvas, left_x, "w", "s")
         self.right_paddle = Paddle(self.canvas, right_x, "up", "down")
+
+    def _setup_ai(self):
+        if self.mode == MODE_AI and self.difficulty:
+            self.ai_controller = AIController(self.right_paddle, self.difficulty)
 
     def _bind_events(self):
         self._press_bind = self.app.root.bind("<KeyPress>", self._on_key_press, add="+")
@@ -314,7 +457,10 @@ class GameFrame(tk.Frame):
 
     def _update(self):
         self.left_paddle.update(self.pressed_keys)
-        self.right_paddle.update(self.pressed_keys)
+        if self.ai_controller is not None:
+            self.ai_controller.update(self.ball)
+        else:
+            self.right_paddle.update(self.pressed_keys)
         bounced = self.ball.update()
         if bounced:
             self.app.audio.play_bounce()
@@ -357,10 +503,10 @@ class GameFrame(tk.Frame):
     def _check_game_over(self):
         if self.left_score >= self.target_score:
             self._game_over = True
-            self._winner = "Left Player"
+            self._winner = self._left_name
         elif self.right_score >= self.target_score:
             self._game_over = True
-            self._winner = "Right Player"
+            self._winner = self._right_name
 
     def destroy(self):
         if self._after_id is not None:
@@ -392,9 +538,10 @@ class GameOverFrame(tk.Frame):
         self._build()
 
     def _build(self):
+        win_text = "You Win!" if self.winner == "You" else f"{self.winner} Wins!"
         tk.Label(self, text="GAME OVER", font=TITLE_FONT,
                  fg=TEXT_COLOR, bg=CANVAS_BG).pack(pady=(70, 10))
-        tk.Label(self, text=f"{self.winner} Wins!",
+        tk.Label(self, text=win_text,
                  font=SUBTITLE_FONT, fg=TEXT_COLOR, bg=CANVAS_BG).pack(pady=10)
         tk.Label(self, text=f"{self.left_score}  -  {self.right_score}",
                  font=SCORE_FONT, fg=TEXT_COLOR, bg=CANVAS_BG).pack(pady=20)
@@ -430,6 +577,8 @@ class PongApp:
         self.container.pack(fill="both", expand=True)
 
         self._current_screen = None
+        self._mode = MODE_MULTIPLAYER
+        self._difficulty = None
         self.show_main_menu()
 
     def _center_window(self):
@@ -451,12 +600,28 @@ class PongApp:
     def show_main_menu(self):
         self._switch_screen(MainMenuFrame(self.container, self))
 
+    def show_mode_select(self):
+        self._switch_screen(ModeSelectFrame(self.container, self))
+
+    def select_mode(self, mode, difficulty):
+        self._mode = mode
+        self._difficulty = difficulty
+        self.show_score_select()
+
     def show_score_select(self):
         self._switch_screen(ScoreSelectFrame(self.container, self))
 
+    def get_mode_label(self):
+        if self._mode == MODE_AI:
+            return f"Mode: vs AI ({self._difficulty})"
+        return "Mode: 2 Players"
+
     def start_game(self, target_score):
         self.audio.stop_menu_bgm()
-        self._switch_screen(GameFrame(self.container, self, target_score))
+        self._switch_screen(GameFrame(
+            self.container, self, target_score,
+            mode=self._mode, difficulty=self._difficulty,
+        ))
 
     def show_game_over(self, winner, left_score, right_score, target_score):
         self.audio.stop_menu_bgm()
